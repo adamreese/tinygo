@@ -5,6 +5,7 @@
 package syscall
 
 import (
+	"sync"
 	"unsafe"
 
 	"internal/wasi/cli/v0.2.0/environment"
@@ -758,7 +759,6 @@ func lstat(pathname *byte, dst *Stat_t) int32 {
 }
 
 func init() {
-	populateEnvironment()
 	populatePreopens()
 }
 
@@ -1232,13 +1232,14 @@ func p2fileTypeToStatType(t types.DescriptorType) uint32 {
 	return 0
 }
 
-var libc_envs map[string]string
-
-func populateEnvironment() {
-	libc_envs = make(map[string]string)
-	for _, kv := range environment.GetEnvironment().Slice() {
-		libc_envs[kv[0]] = kv[1]
-	}
+func libc_envs() map[string]string {
+	return sync.OnceValue(func() map[string]strinng{
+		envs := make(map[string]string)
+		for _, kv := range environment.GetEnvironment().Slice() {
+			envs[kv[0]] = kv[1]
+		}
+		return envs
+	})()
 }
 
 // char * getenv(const char *name);
@@ -1247,7 +1248,7 @@ func populateEnvironment() {
 func getenv(key *byte) *byte {
 	k := goString(key)
 
-	v, ok := libc_envs[k]
+	v, ok := libc_envs()[k]
 	if !ok {
 		return nil
 	}
@@ -1265,12 +1266,12 @@ func getenv(key *byte) *byte {
 //export setenv
 func setenv(key, value *byte, overwrite int) int {
 	k := goString(key)
-	if _, ok := libc_envs[k]; ok && overwrite == 0 {
+	if _, ok := libc_envs()[k]; ok && overwrite == 0 {
 		return 0
 	}
 
 	v := goString(value)
-	libc_envs[k] = v
+	libc_envs()[k] = v
 
 	return 0
 }
@@ -1280,7 +1281,7 @@ func setenv(key, value *byte, overwrite int) int {
 //export unsetenv
 func unsetenv(key *byte) int {
 	k := goString(key)
-	delete(libc_envs, k)
+	delete(libc_envs(), k)
 	return 0
 }
 
