@@ -1232,18 +1232,18 @@ func p2fileTypeToStatType(t types.DescriptorType) uint32 {
 }
 
 var _libc_envs map[string]string
+var _libc_envsOnce sync.Once
 
 func libc_envs() map[string]string {
-	if _libc_envs != nil {
-		return _libc_envs
-	}
-	return sync.OnceValue(func() map[string]string{
+	_libc_envsOnce.Do(func(){
 		envs := make(map[string]string)
 		for _, kv := range environment.GetEnvironment().Slice() {
 			envs[kv[0]] = kv[1]
 		}
-		return envs
-	})()
+		_libc_envs = envs
+
+	})
+	return _libc_envs
 }
 
 // char * getenv(const char *name);
