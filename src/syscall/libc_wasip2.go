@@ -43,7 +43,7 @@ func strlen(cstr *byte) uintptr {
 //
 //export write
 func write(fd int32, buf *byte, count uint) int {
-	if stream, ok := wasiStreams[fd]; ok {
+	if stream, ok := wasiStreams()[fd]; ok {
 		return writeStream(stream, buf, count, 0)
 	}
 
@@ -69,7 +69,7 @@ func write(fd int32, buf *byte, count uint) int {
 //
 //export read
 func read(fd int32, buf *byte, count uint) int {
-	if stream, ok := wasiStreams[fd]; ok {
+	if stream, ok := wasiStreams()[fd]; ok {
 		return readStream(stream, buf, count, 0)
 	}
 
@@ -112,7 +112,7 @@ var wasiFiles map[int32]*wasiFile = make(map[int32]*wasiFile)
 
 func findFreeFD() int32 {
 	var newfd int32
-	for wasiStreams[newfd] != nil || wasiFiles[newfd] != nil {
+	for wasiStreams()[newfd] != nil || wasiFiles[newfd] != nil {
 		newfd++
 	}
 	return newfd
@@ -128,26 +128,30 @@ type wasiStream struct {
 
 // This holds entries for stdin/stdout/stderr.
 
-var wasiStreams map[int32]*wasiStream
+var _wasiStreams map[int32]*wasiStream
+var _wasiStreamsOnce sync.Once
 
-func init() {
-	sin := stdin.GetStdin()
-	sout := stdout.GetStdout()
-	serr := stderr.GetStderr()
-	wasiStreams = map[int32]*wasiStream{
-		0: &wasiStream{
-			in:   &sin,
-			refs: 1,
-		},
-		1: &wasiStream{
-			out:  &sout,
-			refs: 1,
-		},
-		2: &wasiStream{
-			out:  &serr,
-			refs: 1,
-		},
-	}
+func wasiStreams() map[int32]*wasiStream {
+	_wasiStreamsOnce.Do(func(){
+		sin := stdin.GetStdin()
+		sout := stdout.GetStdout()
+		serr := stderr.GetStderr()
+		_wasiStreams = map[int32]*wasiStream{
+			0: &wasiStream{
+				in:   &sin,
+				refs: 1,
+			},
+			1: &wasiStream{
+				out:  &sout,
+				refs: 1,
+			},
+			2: &wasiStream{
+				out:  &serr,
+				refs: 1,
+			},
+		}
+	})
+	return _wasiStreams
 }
 
 func readStream(stream *wasiStream, buf *byte, count uint, offset int64) int {
@@ -229,7 +233,7 @@ func memcpy(dst, src unsafe.Pointer, size uintptr)
 func pread(fd int32, buf *byte, count uint, offset int64) int {
 	// TODO(dgryski): Need to be consistent about all these checks; EBADF/EINVAL/... ?
 
-	if stream, ok := wasiStreams[fd]; ok {
+	if stream, ok := wasiStreams()[fd]; ok {
 		return readStream(stream, buf, count, offset)
 
 	}
@@ -267,7 +271,7 @@ func pread(fd int32, buf *byte, count uint, offset int64) int {
 //export pwrite
 func pwrite(fd int32, buf *byte, count uint, offset int64) int {
 	// TODO(dgryski): Need to be consistent about all these checks; EBADF/EINVAL/... ?
-	if stream, ok := wasiStreams[fd]; ok {
+	if stream, ok := wasiStreams()[fd]; ok {
 		return writeStream(stream, buf, count, 0)
 	}
 
@@ -300,7 +304,7 @@ func pwrite(fd int32, buf *byte, count uint, offset int64) int {
 //
 //export lseek
 func lseek(fd int32, offset int64, whence int) int64 {
-	if _, ok := wasiStreams[fd]; ok {
+	if _, ok := wasiStreams()[fd]; ok {
 		// can't lseek a stream
 		libcErrno = EBADF
 		return -1
@@ -337,7 +341,7 @@ func lseek(fd int32, offset int64, whence int) int64 {
 //
 //export close
 func close(fd int32) int32 {
-	if streams, ok := wasiStreams[fd]; ok {
+	if streams, ok := wasiStreams()[fd]; ok {
 		if streams.out != nil {
 			// ignore any error
 			streams.out.BlockingFlush()
@@ -354,7 +358,7 @@ func close(fd int32) int32 {
 			}
 		}
 
-		delete(wasiStreams, fd)
+		delete(_wasiStreams, fd)
 		return 0
 	}
 
@@ -377,10 +381,10 @@ func close(fd int32) int32 {
 //export dup
 func dup(fd int32) int32 {
 	// is fd a stream?
-	if stream, ok := wasiStreams[fd]; ok {
+	if stream, ok := wasiStreams()[fd]; ok {
 		newfd := findFreeFD()
 		stream.refs++
-		wasiStreams[newfd] = stream
+		_wasiStreams[newfd] = stream
 		return newfd
 	}
 
@@ -569,7 +573,7 @@ func link(from, to *byte) int32 {
 //
 //export fsync
 func fsync(fd int32) int32 {
-	if _, ok := wasiStreams[fd]; ok {
+	if _, ok := wasiStreams()[fd]; ok {
 		// can't sync a stream
 		libcErrno = EBADF
 		return -1
@@ -678,7 +682,7 @@ func stat(pathname *byte, dst *Stat_t) int32 {
 //
 //export fstat
 func fstat(fd int32, dst *Stat_t) int32 {
-	if _, ok := wasiStreams[fd]; ok {
+	if _, ok := wasiStreams()[fd]; ok {
 		// TODO(dgryski): fill in stat buffer for stdin etc
 		return -1
 	}
@@ -758,10 +762,6 @@ func lstat(pathname *byte, dst *Stat_t) int32 {
 	return 0
 }
 
-func init() {
-	populatePreopens()
-}
-
 type wasiDir struct {
 	d    types.Descriptor // wasip2 descriptor
 	root string           // root path for this descriptor
@@ -770,32 +770,31 @@ type wasiDir struct {
 
 var libcCWD wasiDir
 
-var wasiPreopens map[string]types.Descriptor
+func wasiPreopens() map[string]types.Descriptor {
+	return sync.OnceValue(func() map[string]types.Descriptor {
+		var cwd string
 
-func populatePreopens() {
-
-	var cwd string
-
-	// find CWD
-	result := environment.InitialCWD()
-	if s := result.Some(); s != nil {
-		cwd = *s
-	} else if s, _ := Getenv("PWD"); s != "" {
-		cwd = s
-	}
-
-	dirs := preopens.GetDirectories().Slice()
-	preopens := make(map[string]types.Descriptor, len(dirs))
-	for _, tup := range dirs {
-		desc, path := tup.F0, tup.F1
-		if path == cwd {
-			libcCWD.d = desc
-			libcCWD.root = path
-			libcCWD.rel = ""
+		// find CWD
+		result := environment.InitialCWD()
+		if s := result.Some(); s != nil {
+			cwd = *s
+		} else if s, _ := Getenv("PWD"); s != "" {
+			cwd = s
 		}
-		preopens[path] = desc
-	}
-	wasiPreopens = preopens
+
+		dirs := preopens.GetDirectories().Slice()
+		preopens := make(map[string]types.Descriptor, len(dirs))
+		for _, tup := range dirs {
+			desc, path := tup.F0, tup.F1
+			if path == cwd {
+				libcCWD.d = desc
+				libcCWD.root = path
+				libcCWD.rel = ""
+			}
+			preopens[path] = desc
+		}
+		return preopens
+	})()
 }
 
 // -- BEGIN fs_wasip1.go --
@@ -921,7 +920,7 @@ func findPreopenForPath(path string) (wasiDir, string) {
 	path = joinPath(dir, path)
 
 	var best string
-	for k, v := range wasiPreopens {
+	for k, v := range wasiPreopens() {
 		if len(k) > len(best) && hasPrefix(path, k) {
 			wasidir = wasiDir{d: v, root: k}
 			best = wasidir.root
@@ -1099,7 +1098,7 @@ type libc_DIR struct {
 //
 //export fdopendir
 func fdopendir(fd int32) unsafe.Pointer {
-	if _, ok := wasiStreams[fd]; ok {
+	if _, ok := wasiStreams()[fd]; ok {
 		libcErrno = EBADF
 		return nil
 	}
@@ -1232,8 +1231,13 @@ func p2fileTypeToStatType(t types.DescriptorType) uint32 {
 	return 0
 }
 
+var _libc_envs map[string]string
+
 func libc_envs() map[string]string {
-	return sync.OnceValue(func() map[string]strinng{
+	if _libc_envs != nil {
+		return _libc_envs
+	}
+	return sync.OnceValue(func() map[string]string{
 		envs := make(map[string]string)
 		for _, kv := range environment.GetEnvironment().Slice() {
 			envs[kv[0]] = kv[1]
@@ -1271,7 +1275,7 @@ func setenv(key, value *byte, overwrite int) int {
 	}
 
 	v := goString(value)
-	libc_envs()[k] = v
+	_libc_envs[k] = v
 
 	return 0
 }
@@ -1281,7 +1285,7 @@ func setenv(key, value *byte, overwrite int) int {
 //export unsetenv
 func unsetenv(key *byte) int {
 	k := goString(key)
-	delete(libc_envs(), k)
+	delete(_libc_envs, k)
 	return 0
 }
 
