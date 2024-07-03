@@ -132,7 +132,7 @@ var _wasiStreams map[int32]*wasiStream
 var _wasiStreamsOnce sync.Once
 
 func wasiStreams() map[int32]*wasiStream {
-	_wasiStreamsOnce.Do(func(){
+	_wasiStreamsOnce.Do(func() {
 		sin := stdin.GetStdin()
 		sout := stdout.GetStdout()
 		serr := stderr.GetStderr()
@@ -1235,7 +1235,7 @@ var _libc_envs map[string]string
 var _libc_envsOnce sync.Once
 
 func libc_envs() map[string]string {
-	_libc_envsOnce.Do(func(){
+	_libc_envsOnce.Do(func() {
 		envs := make(map[string]string)
 		for _, kv := range environment.GetEnvironment().Slice() {
 			envs[kv[0]] = kv[1]
@@ -1284,6 +1284,7 @@ func setenv(key, value *byte, overwrite int) int {
 //
 //export unsetenv
 func unsetenv(key *byte) int {
+	libc_envs() // ensure that _libc_envs is initialized
 	k := goString(key)
 	delete(_libc_envs, k)
 	return 0
