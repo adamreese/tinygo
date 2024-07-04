@@ -132,7 +132,7 @@ var _wasiStreams map[int32]*wasiStream
 var _wasiStreamsOnce sync.Once
 
 func wasiStreams() map[int32]*wasiStream {
-	_wasiStreamsOnce.Do(func() {
+	_wasiStreamsOnce.Do(func()              {
 		sin := stdin.GetStdin()
 		sout := stdout.GetStdout()
 		serr := stderr.GetStderr()
@@ -768,10 +768,18 @@ type wasiDir struct {
 	rel  string           // relative path under root
 }
 
-var libcCWD wasiDir
+var _libcCWD wasiDir
+
+func libcCWD() wasiDir {
+	wasiPreopens() // ensure initialized
+	return _libcCWD
+}
+
+var _wasiPreopens map[string]types.Descriptor
+var _wasiPreopensOnce sync.Once
 
 func wasiPreopens() map[string]types.Descriptor {
-	return sync.OnceValue(func() map[string]types.Descriptor {
+	_wasiPreopensOnce.Do(func() {
 		var cwd string
 
 		// find CWD
@@ -783,18 +791,18 @@ func wasiPreopens() map[string]types.Descriptor {
 		}
 
 		dirs := preopens.GetDirectories().Slice()
-		preopens := make(map[string]types.Descriptor, len(dirs))
+		_wasiPreopens = make(map[string]types.Descriptor, len(dirs))
 		for _, tup := range dirs {
 			desc, path := tup.F0, tup.F1
 			if path == cwd {
-				libcCWD.d = desc
-				libcCWD.root = path
-				libcCWD.rel = ""
+				_libcCWD.d = desc
+				_libcCWD.root = path
+				_libcCWD.rel = ""
 			}
-			preopens[path] = desc
+			_wasiPreopens[path] = desc
 		}
-		return preopens
-	})()
+	})
+	return _wasiPreopens
 }
 
 // -- BEGIN fs_wasip1.go --
@@ -911,10 +919,10 @@ func findPreopenForPath(path string) (wasiDir, string) {
 	var wasidir wasiDir
 
 	if !isAbs(path) {
-		dir = libcCWD.root
-		wasidir = libcCWD
-		if libcCWD.rel != "" && libcCWD.rel != "." && libcCWD.rel != "./" {
-			path = libcCWD.rel + "/" + path
+		wasidir = libcCWD()
+		dir = wasidir.root
+		if wasidir.rel != "" && wasidir.rel != "." && wasidir.rel != "./" {
+			path = wasidir.rel + "/" + path
 		}
 	}
 	path = joinPath(dir, path)
@@ -1208,7 +1216,7 @@ func p2fileTypeToDirentType(t types.DescriptorType) uint8 {
 	return DT_UNKNOWN
 }
 
-func p2fileTypeToStatType(t types.DescriptorType) uint32 {
+func p2fileTypeToStatType   (t types.DescriptorType) uint32 {
 	switch t {
 	case types.DescriptorTypeUnknown:
 		return 0
@@ -1227,7 +1235,7 @@ func p2fileTypeToStatType(t types.DescriptorType) uint32 {
 	case types.DescriptorTypeSocket:
 		return S_IFSOCK
 	}
-
+ 
 	return 0
 }
 
@@ -1235,7 +1243,7 @@ var _libc_envs map[string]string
 var _libc_envsOnce sync.Once
 
 func libc_envs() map[string]string {
-	_libc_envsOnce.Do(func() {
+	_libc_envsOnce.Do(func()    {
 		envs := make(map[string]string)
 		for _, kv := range environment.GetEnvironment().Slice() {
 			envs[kv[0]] = kv[1]
@@ -1306,7 +1314,7 @@ func chdir(name *byte) int {
 	path := goString(name) + "/"
 
 	if !isAbs(path) {
-		path = joinPath(libcCWD.root+"/"+libcCWD.rel+"/", path)
+		path = joinPath(libcCWD().root+"/"+libcCWD().rel+"/", path)
 	}
 
 	if path == "." {
@@ -1325,9 +1333,9 @@ func chdir(name *byte) int {
 		return -1
 	}
 
-	libcCWD = dir
+	_libcCWD = dir
 	// keep the same cwd base but update "rel" to point to new base path
-	libcCWD.rel = rel
+	_libcCWD.rel = rel
 
 	return 0
 }
@@ -1336,10 +1344,10 @@ func chdir(name *byte) int {
 //
 //export getcwd
 func getcwd(buf *byte, size uint) *byte {
-
-	cwd := libcCWD.root
-	if libcCWD.rel != "" && libcCWD.rel != "." && libcCWD.rel != "./" {
-		cwd += libcCWD.rel
+	wasidir := libcCWD()
+	cwd := wasidir.root
+	if wasidir.rel != "" && wasidir.rel != "." && wasidir.rel != "./" {
+		cwd += wasidir.rel
 	}
 
 	if buf == nil {
